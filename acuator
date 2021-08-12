@@ -1,0 +1,421 @@
+#define amp0 A5
+#define amp1 A2
+#define PWMA0 10 //Mot 
+#define PWMB0 9 //Mot 
+#define enable 13   //pins for first MegaMoto
+
+#define amp2 A4
+#define amp3 A1
+#define PWMA1 5 //Mot 
+#define PWMB1 6 //Mot //pins for second MegaMoto (share enable)
+
+#define hall0 50
+#define hall1 51
+#define hall2 52
+#define hall3 53  //interrupt pins for hall effect sensors
+
+#define backwards0 21
+#define forwards0 20
+#define backwards1 19
+#define forwards1 18
+#define backwards2 17
+#define forwards2 16
+#define backwards3 15
+#define forwards3 14 //relay pins
+
+#define switch0 4   //Up button
+#define switch1 7  //Down button
+
+int numActs = 4;//Number of actuators you are syncing
+
+int amp[] = {0, 0, 0, 0}; //current readings put as many values as there are actuators
+int maxAmps = 100;//value for detecting overload
+int minAmps = 0;//value to detect when actuator is stopped
+int spd[] = {0, 0, 0, 0}; //speeds put 1 for each actuator (relay choose direction)
+int sw[] = {1, 1}; //switch up, switch down
+int prev[] = {0, 0};//previous switch state
+
+int maxPos = 800;
+
+volatile int count[] = {0, 0, 0, 0};//Act0, Act1, Act2, Act3
+int avgCount = 0; //average speed value
+int timedelay[] = {750, 50}; //first, regular for current monitoring
+int FWDspd = 255, REVspd = 255;//default speed values (max)
+int maxSpeed = 255;
+
+int hitLimits = 0;
+int hitLimitsmax = 20;
+
+bool forwards = false;
+bool backwards = false;
+
+bool dontExtend = false;
+bool dontRetract = false;
+
+bool fullyRetracted[] = {true, true, true, true};//use these to tell individually if actuators are retracted
+bool allRetracted = true;//use this to count when all actuators are extended
+int retractedSum = 0;//used to know when all actuators are retracted
+
+bool firstRun = true;//first run of the motor once the button is pushed
+
+void setup()
+{
+  pinMode(amp0, INPUT);
+  pinMode(amp1, INPUT);
+  pinMode(amp2, INPUT);
+  pinMode(amp3, INPUT);//set current sensors as inputs
+  digitalWrite(amp0, LOW);
+  digitalWrite(amp1, LOW);
+  digitalWrite(amp2, LOW);
+  digitalWrite(amp3, LOW);//set Current sensors to 0
+
+
+  pinMode(PWMA0, OUTPUT);
+  pinMode(PWMB0, OUTPUT);
+  pinMode(PWMA1, OUTPUT);
+  pinMode(PWMB1, OUTPUT);//set PWM outputs
+
+  pinMode(forwards0, OUTPUT);
+  pinMode(forwards1, OUTPUT);
+  pinMode(forwards2, OUTPUT);
+  pinMode(forwards3, OUTPUT);
+  pinMode(backwards0, OUTPUT);
+  pinMode(backwards1, OUTPUT);
+  pinMode(backwards2, OUTPUT);
+  pinMode(backwards3, OUTPUT);//set all relays as outputs
+
+  pinMode(switch0, INPUT);
+  pinMode(switch1, INPUT);//set up/down switch
+
+  digitalWrite(switch0, HIGH);
+  digitalWrite(switch1, HIGH);//enable enternal relays
+
+  pinMode(hall0, INPUT);
+  pinMode(hall1, INPUT);
+  pinMode(hall2, INPUT);
+  pinMode(hall3, INPUT);//set all hall inputs
+
+  digitalWrite(hall0, LOW);
+  digitalWrite(hall1, LOW);
+  digitalWrite(hall2, LOW);
+  digitalWrite(hall3, LOW);//set low to start for rising edge
+
+  pinMode(enable, OUTPUT);
+  digitalWrite(enable, LOW); //enable motor boards, start disabled
+
+  attachInterrupt(digitalPinToInterrupt(hall0), speed0, RISING);
+  attachInterrupt(digitalPinToInterrupt(hall1), speed1, RISING);
+  attachInterrupt(digitalPinToInterrupt(hall2), speed2, RISING);
+  attachInterrupt(digitalPinToInterrupt(hall3), speed3, RISING); //enable the four hall effect interupts
+
+  dontExtend = false;
+  dontRetract = false;
+  allRetracted = true;//start assuming retracted
+
+  Serial.begin(9600);
+}
+
+void loop()
+{
+  Serial.println("Main loop");
+  ReadInputs();//check input button, calculate speeds
+  adjustCounts();//check min/max values
+
+  if (sw[0] == 0 && sw[1] == 1 && dontExtend == false) goForwards();
+  else if (sw[0] == 1 && sw[1] == 0 && dontRetract == false) goBackwards();
+  else stopMoving();
+
+  for (int i = 0; i <= 1; i++) prev[i] = sw[i]; //store switch values as previous values
+}//end loop
+
+void speed0() {
+  //Serial.println("Update 0");
+  if (forwards == true) count[0]++; //if moving forwards, add counts
+  else count[0]--; //if moving back, subtract counts
+}//end speed0
+
+void speed1() {
+  //Serial.println("Update 1");
+  if (forwards == true) count[1]++; //if moving forwards, add counts
+  else count[1]--; //if moving back, subtract counts
+}//end speed1
+
+void speed2() {
+  //Serial.println("Update 2");
+  if (forwards == true) count[2]++; //if moving forwards, add counts
+  else count[2]--; //if moving back, subtract counts
+}//end speed2
+
+void speed3() {
+  //Serial.println("Update 3");
+  if (forwards == true) count[3]++; //if moving forwards, add counts
+  else count[3]--; //if moving back, subtract counts
+}//end speed3
+
+void ReadInputs() {
+  amp[0] = analogRead(amp0);
+  amp[1] = analogRead(amp1);
+  amp[2] = analogRead(amp2);
+  amp[3] = analogRead(amp3);//check currents
+
+  sw[0] = digitalRead(switch0);
+  sw[1] = digitalRead(switch1);//check switches
+}//end read inputs
+
+void adjustCounts() {
+  for (int y = 0; y < numActs; y++) {
+    if (count[y] < 0) count[y] = 0;
+    if (count[y] > maxPos) count[y] = maxPos;
+  }//end for
+
+  
+}//end adjustCounts
+
+void goForwards() {
+  Serial.println("FWD");
+  if (prev[0] == 1 && sw[0] == 0) firstRun = true;
+  else firstRun = false;
+  forwards = true;
+  backwards = false;
+  for (int v = 0; v < numActs; v++) fullyRetracted[v] = false;//once you travel forwards,actuators are not retracted
+  allRetracted = false;//set all actuators to not retracted
+  //Serial.println("Moving forwards");
+  for (int t = 0; t < numActs; t++) spd[t] = FWDspd;//apply speeds
+
+  FWDsync();//update speeds based on hall effect counts
+  getFeedback();//check current draw
+
+  digitalWrite(enable, HIGH);//enable boards
+  //Serial.print("Dont Extend"), Serial.println(dontExtend);
+  if (dontExtend == true)
+  {
+    Serial.println("dontExtend");
+    stopMoving();
+  }
+  delay(10);//slight delay
+
+  digitalWrite(forwards0, LOW);
+  digitalWrite(forwards1, LOW);
+  digitalWrite(forwards2, LOW);
+  digitalWrite(forwards3, LOW);
+  digitalWrite(backwards0, HIGH);
+  digitalWrite(backwards1, HIGH);
+  digitalWrite(backwards2, HIGH);
+  digitalWrite(backwards3, HIGH);//turn on forward relays
+
+  analogWrite(PWMA0, spd[0]);
+  analogWrite(PWMB0, spd[1]);
+  analogWrite(PWMA1, spd[2]);
+  analogWrite(PWMB1, spd[3]);//set speeds
+
+  if (firstRun == true) delay(timedelay[0]);
+  else delay(timedelay[1]); //small delay to get to speed
+
+  dontRetract = false;//once you have moved forwards, you can move back again.
+  firstRun = false;
+
+}//end goForwards
+
+void goBackwards() {
+  Serial.println("REV");
+  if (prev[1] == 1 && sw[1] == 0) firstRun = true;
+  else firstRun = false;
+  forwards = false;
+  backwards = true;
+  //Serial.println("Moving backwards");
+  for (int t = 0; t < numActs; t++) spd[t] = REVspd;
+
+  REVsync();//update speeds based on hall effect counts
+  getFeedback();//check current draw
+  
+  digitalWrite(enable, HIGH);//enable boards
+  
+  //Serial.print("Dont Retract"), Serial.println(dontRetract);
+  if (dontRetract == true)
+  {
+    Serial.println("dontRetract");
+    stopMoving();
+  }
+  delay(10);//slight delay
+
+  digitalWrite(forwards0, HIGH);
+  digitalWrite(forwards1, HIGH);
+  digitalWrite(forwards2, HIGH);
+  digitalWrite(forwards3, HIGH);
+  digitalWrite(backwards0, LOW);
+  digitalWrite(backwards1, LOW);
+  digitalWrite(backwards2, LOW);
+  digitalWrite(backwards3, LOW);//turn on reverse relays
+
+  analogWrite(PWMA0, spd[0]);
+  analogWrite(PWMB0, spd[1]);
+  analogWrite(PWMA1, spd[2]);
+  analogWrite(PWMB1, spd[3]);//set speeds
+
+  if (firstRun == true) delay(timedelay[0]);
+  else delay(timedelay[1]); //small delay to get to speed
+
+  dontExtend = false;//once you have moved backwards, you can move forwards again.
+  firstRun = false;
+}//end goBackwards
+
+void stopMoving() {
+  forwards = false;
+  backwards = false;
+  Serial.println("Stopped");
+
+  analogWrite(PWMA0, 0);
+  analogWrite(PWMB0, 0);
+  analogWrite(PWMA1, 0);
+  analogWrite(PWMB1, 0);//set speeds to 0
+  delay(50);
+  
+  digitalWrite(forwards0, HIGH);
+  digitalWrite(backwards0, HIGH);
+  digitalWrite(forwards1, HIGH);
+  digitalWrite(backwards1, HIGH);
+  digitalWrite(forwards2, HIGH);
+  digitalWrite(backwards2, HIGH);
+  digitalWrite(forwards3, HIGH);
+  digitalWrite(backwards3, HIGH);//turn off all relays
+
+  digitalWrite(enable, LOW);//disable boards
+}//end stopMoving
+
+void FWDsync() {
+  //Serial.println("FWDsync");
+  avgCount = 0;
+  for (int y = 0; y < numActs; y++) avgCount = count[y] + avgCount;
+  avgCount = avgCount / numActs;
+  avgCount = abs(avgCount);
+  if (avgCount >= maxPos) {
+    dontExtend = true;
+    return;
+  }
+  //Serial.print(" avgCount "), Serial.println(avgCount);
+
+  for (int q = 0; q < numActs; q++)
+  {
+    int diff = count[q] - avgCount;
+    diff = abs(diff);
+    //Serial.print(" diff "), Serial.println(diff);
+    if (diff >= 5)
+    {
+      if (count[q] > avgCount) spd[q] = FWDspd - 20;
+      //else spd[q] = FWDspd;
+
+      if (diff >= 10)
+      {
+        if (count[q] > avgCount) spd[q] = FWDspd - 40;
+        //else spd[q] = FWDspd;
+
+        if (diff >= 20)
+        {
+          if (count[q] > avgCount) spd[q] = FWDspd - 60;
+          //else spd[q] = FWDspd;
+
+          if (diff >= 30)
+          {
+            if (count[q] > avgCount) spd[q] = 0;
+            //else spd[q] = FWDspd;
+          }//end if diff>40
+        }//end if diff>30
+      }//end if diff>20
+    }//end if diff>10
+
+    else spd[q] = FWDspd;
+    //Serial.print(" FWDspd  "), Serial.print(q), Serial.print(" : "), Serial.println(spd[q]);
+    //Serial.print(" Counts  "), Serial.print(q), Serial.print(" : "), Serial.println(count[q]);
+  }//end for
+}//end FWDSync
+
+void REVsync() {
+  //Serial.println("REVsync");
+  avgCount = 0;
+  for (int y = 0; y < numActs; y++) avgCount = count[y] + avgCount;
+  avgCount = avgCount / numActs;
+  avgCount = abs(avgCount);
+  //Serial.print(" avgCount "), Serial.println(avgCount);
+
+  for (int q = 0; q < numActs; q++)
+  {
+    int diff = avgCount - count[q];
+    diff = abs(diff);
+   // Serial.print(" diff "), Serial.println(diff);
+    if (diff >= 5)
+    {
+      if (count[q] < avgCount) spd[q] = REVspd - 20;
+      //else spd[q] = REVspd;
+
+      if (diff >= 10)
+      {
+        if (count[q] < avgCount) spd[q] = REVspd - 40;
+        //else spd[q] = REVspd;
+
+        if (diff >= 20)
+        {
+          if (count[q] < avgCount) spd[q] = REVspd - 60;
+          //else spd[q] = REVspd;
+
+          if (diff >= 30)
+          {
+            if (count[q] < avgCount) spd[q] = 0;
+            //else spd[q] = REVspd;
+          }//end if diff>40
+        }//end if diff>30
+      }//end if diff>20
+    }//end if diff>10
+
+    else spd[q] = REVspd;
+
+    Serial.print(" REVspd  "), Serial.print(q), Serial.print(" : "), Serial.println(spd[q]);
+    Serial.print(" Counts  "), Serial.print(q), Serial.print(" : "), Serial.println(count[q]);
+
+  }//end for
+}//end REVsync
+
+void getFeedback() {
+  amp[0] = analogRead(amp0);
+  amp[1] = analogRead(amp1);
+  amp[2] = analogRead(amp2);
+  amp[3] = analogRead(amp3);
+
+  //Serial.print(" Amp readings - "), Serial.print(amp[0]), Serial.print(", "), Serial.print(amp[1]);
+  //Serial.print(", "), Serial.print(amp[2]), Serial.print(", "), Serial.println(amp[3]);
+
+  retractedSum = 0;
+
+  for (int x = 0; x < numActs; x++)
+  {
+    if (amp[x] <= minAmps && hitLimits < hitLimitsmax) hitLimits = hitLimits + 1;
+    else hitLimits = 0;
+    if (hitLimits == hitLimitsmax && backwards == true) fullyRetracted[x] = true;
+    else fullyRetracted[x] == false;
+
+    retractedSum = retractedSum + fullyRetracted[x];
+    //Serial.println("Hit limits Counts");
+    if (retractedSum >= numActs) allRetracted = true;
+    else allRetracted = false;
+  }//end for
+
+  if (allRetracted == true)
+  {
+    for (int e = 0; e < numActs; e++) count[e] = 0;//home counts to 0 when retracted
+    hitLimits = 0;
+    //Serial.println("Reset Counts");
+  }//end allretracted
+
+  for (int j = 0; j < numActs; j++)
+  {
+    if (amp[j] > maxAmps)
+    {
+      for (int k = 0; k < numActs; k++) spd[k] = 0;//set all speeds to 0
+      Serial.println("TRIPPED 0");
+      Serial.print(" Amp readings - "), Serial.print(amp[0]), Serial.print(", "), Serial.print(amp[1]);
+      Serial.print(", "), Serial.print(amp[2]), Serial.print(", "), Serial.println(amp[3]);
+      
+      if (forwards == true) dontExtend = true;
+      else if (backwards == true) dontRetract = true;//disable movement in the direction the limit was tripped
+    }//end if
+  }//end for
+}//end getFeedback
